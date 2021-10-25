@@ -1,4 +1,4 @@
-function generateGrid(spec, rows = 10) {
+function generateGrid(spec) {
   const splitField = spec.meta.splitField;
   const encoding = spec.spec ? spec.spec.encoding : spec.encoding;
   const groupKeys = [];
@@ -13,16 +13,32 @@ function generateGrid(spec, rows = 10) {
   }
 
   let specValues = spec.data.values;
-  let colorField = null;
 
-  if (
-    splitField &&
-    encoding.color &&
-    encoding.color.field !== splitField &&
-    groupKeys.indexOf(encoding.color.field) === -1
-  ) {
-    colorField = encoding.color.field;
 
+  let secondarySplit = Object.keys(encoding).filter(d => {
+    const field = encoding[d].field;
+    if (!field) return false;
+    return d !== 'x' && d !== 'y' && 
+           field !== splitField && 
+           groupKeys.indexOf(field) === -1;
+  })[0];
+
+  let secondaryField = null;
+
+  // combine groups
+  // for example, if splitField = player, but color = hit:
+
+  // { "n": 5,  "player": "a", "hit": "yes" },
+  // { "n": 10, "player": "a", "hit": "no" },
+  // { "n": 15, "player": "b", "hit": "yes" },
+  // { "n": 35, "player": "b", "hit": "no" }
+
+  // after this code block we will get:
+  // { "n": 15,  "player": "a", "hit": { "yes": 5, "no": 10 } },
+  // { "n": 50, "player": "b", "hit": { "yes": 15, "no": 35 } },
+
+  if (splitField && secondarySplit) {
+    secondaryField = encoding[secondarySplit].field;
     const keys = [...groupKeys, splitField];
 
     const grouped = d3.rollups(
@@ -33,17 +49,19 @@ function generateGrid(spec, rows = 10) {
 
         arr.forEach(x => {
           sum += x.n;
-          obj[x[encoding.color.field]] = sum;
+          obj[x[secondaryField]] = sum;
         });
 
         const o = {
           [splitField]: arr[0][splitField],
-          [encoding.color.field]: obj,
+          [secondaryField]: obj,
           n: sum,
         };
+
         groupKeys.forEach(x => {
           o[x] = arr[0][x];
         });
+
         return o;
       },
       ...keys.map((key) => {
@@ -60,7 +78,8 @@ function generateGrid(spec, rows = 10) {
     });
   }
 
-  const maxCols = Math.ceil(d3.max(specValues, d => d.n) / rows);
+  const maxN = d3.max(specValues, d => d.n);
+  const maxCols = Math.ceil(Math.sqrt(maxN));
 
   let splitOptions = [];
 
@@ -70,44 +89,57 @@ function generateGrid(spec, rows = 10) {
     )
   }
 
-  let counter = 1;
-
   const reduce = (v) => {
     const arr = [];
 
     v.forEach((d, j) => {
       const n = d.n;
-      const xCenter = splitField ? splitOptions.indexOf(d[splitField]) + 1 : 1;
 
-      let startCol = (xCenter - 1) * maxCols + j; // inner grid start
-      startCol += Math.floor((maxCols - Math.ceil(n / rows)) / 2); // center alignment
+      const xCenter = splitField ? splitOptions.indexOf(d[splitField]) + 1 : 1;
+      const prev = j ? v[j - 1].n : 0;
+      const startCol = (xCenter - 1) * maxCols + j; // inner grid start
 
       for (let i = 0; i < n; i++) {
-        const x = startCol + Math.floor(i / rows);
-        const y = rows - 1 - i % rows;
+        const x = startCol + i % maxCols;
+        const y = maxCols - 1 - Math.floor(i / maxCols);
+
         const colorFieldObj = {};
 
-        if (colorField && typeof[d[colorField]] === "object") {
-          colorFieldObj[colorField] = lookupByBucket(
-            Object.keys(d[colorField]),
-            Object.values(d[colorField]),
+        if (secondaryField && typeof[d[secondaryField]] === "object") {
+          colorFieldObj[secondaryField] = lookupByBucket(
+            Object.keys(d[secondaryField]),
+            Object.values(d[secondaryField]),
             i,
           )
         }
 
+        const r = Math.floor(i / maxCols);
+        let c = i % maxCols;
+
+        let rows = Math.floor(n / maxCols);
+
+        const full = maxCols * rows;
+        const diff = n - full;
+
+        let dx = 0;
+
+        if (diff && c >= diff) {
+          dx = 1;
+        }
+
+        let gemini_id = c * rows + r + prev + dx;
+
         arr.push({
           ...d,
           ...colorFieldObj,
-          gemini_id: counter,
+          gemini_id,
           [CONF.X_FIELD]: x,
           [CONF.Y_FIELD]: y,
         });
-
-        counter++;
       }
     });
 
-    return arr;
+    return arr.sort((a, b) => a.gemini_id - b.gemini_id);
   };
 
   if (groupKeys.length === 0) {
@@ -133,12 +165,11 @@ function generateGrid(spec, rows = 10) {
 /**
  * Generates infogrid specification
  * @param {Object} spec vega-lite specification
- * @param {Number} rows number of rows in a grid
  * @returns grid specification
  */
-function getGridSpec(spec, rows = 10) {
+function getGridSpec(spec) {
   return new Promise((res) => {
-    const grid = generateGrid(spec, rows);
+    const grid = generateGrid(spec);
     const obj = {...spec};
     const encoding = obj.spec ? obj.spec.encoding : obj.encoding;
 
